@@ -167,6 +167,8 @@ if __name__ == '__main__':
         # Use production WSGI server
         socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
     else:
-        # Development mode
-        socketio.run(app, host='0.0.0.0', port=port, debug=True)
+    # Development fallback (still safe on cloud)
+    socketio.run(app, host='0.0.0.0', port=port, 
+                 debug=False, allow_unsafe_werkzeug=True)
+
 
