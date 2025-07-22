@@ -162,13 +162,11 @@ if __name__ == '__main__':
     # Get port from environment variable (Render sets this)
     port = int(os.environ.get('PORT', 5000))
     
-    # Production-ready server configuration
-if os.environ.get('FLASK_ENV') == 'production':
-    # Use production WSGI server
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
-else:
-    # Development mode
-    # FORCE Werkzeug override to get Render working immediately
-    socketio.run(app, host='0.0.0.0', port=port,
-                 debug=False, allow_unsafe_werkzeug=True)
+   # TEMP: Force Werkzeug override for Render
+	import os
+	print("=== Executing main.py ===")
+	print(f"FILE: {os.path.abspath(__file__)}")
+
+	socketio.run(app, host='0.0.0.0', port=5000,
+             debug=False, allow_unsafe_werkzeug=True)
 
