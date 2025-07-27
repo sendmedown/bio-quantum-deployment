@@ -1,122 +1,148 @@
 const express = require('express');
-const { WebSocketServer } = require('ws');
-const redis = require('redis');
+const cors = require('cors');
 const jwt = require('jsonwebtoken');
-const { v4: uuidv4 } = require('uuid'); // Added for UUID generation
-require('dotenv').config();
+const { WebSocketServer } = require('ws');
+const { v4: uuidv4 } = require('uuid');
+const redis = require('redis');
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
-// Validate environment variables
-const requiredEnvVars = ['JWT_SECRET', 'PAYPAL_CLIENT_ID', 'PAYPAL_SECRET', 'ALPACA_API_KEY', 'ALPACA_SECRET_KEY'];
-const missingEnvVars = requiredEnvVars.filter((envVar) => !process.env[envVar]);
-if (missingEnvVars.length > 0) {
-  console.error(`Missing environment variables: ${missingEnvVars.join(', ')}`);
-  process.exit(1);
-}
+const dnaStrands = new Map(); // In-memory DNA model
+global.wss = new WebSocketServer({ port: 5003 });
 
-// Mock shared directory files (based on /shared)
-const sharedFiles = [
-  { fileName: 'hldd_integration_mapper.json', lastModified: '2025-07-17T03:00:00Z' },
-  { fileName: 'bulk_import_pipeline.py', lastModified: '2025-07-17T03:00:00Z' },
-  { fileName: 'notion_sync.py', lastModified: '2025-07-17T03:00:00Z' },
-  { fileName: 'HLDD.txt', lastModified: '2025-07-17T03:00:00Z' }
-];
-
-// Mock HLDD structure (based on /hldd endpoint expectations)
-const hlddStructure = {
-  trade: {
-    fields: ['asset', 'volume', 'price', 'timestamp'],
-    source: 'bulk_import_pipeline.py',
-    destination: 'dna_db_integration.py'
-  },
-  strategy: {
-    fields: ['strategyId', 'params', 'creator'],
-    source: 'photonic_gateway_rl.py',
-    destination: 'strategy_replay.js'
-  },
-  chat: {
-    fields: ['userId', 'message', 'timestamp'],
-    source: 'notion_sync.py',
-    destination: 'apiBridge.js'
-  }
-};
-
-// Express Endpoints
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'success', message: 'apiBridge.js is running on Render', requestId: uuidv4() });
-});
-
-app.get('/hldd', (req, res) => {
-  res.status(200).json({ ...hlddStructure, requestId: uuidv4() });
-});
-
-app.get('/get-file/:fileName', (req, res) => {
-  const { fileName } = req.params;
-  const file = sharedFiles.find((f) => f.fileName === fileName);
-  if (file) {
-    res.status(200).json({
-      fileName,
-      content: `Mock content for ${fileName}`,
-      fileType: fileName.split('.').pop(),
-      requestId: uuidv4()
-    });
-  } else {
-    res.status(404).json({ error: 'File not found', requestId: uuidv4() });
-  }
-});
-
-app.get('/list-files', (req, res) => {
-  res.status(200).json({ files: sharedFiles, requestId: uuidv4() });
-});
-
-// WebSocket Setup
-const PORT = process.env.PORT || 10000;
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`apiBridge.js running on port ${PORT}`);
-});
-
-const wss = new WebSocketServer({ server });
-
+// WebSocket connection handler
 wss.on('connection', (ws, req) => {
-  // Extract JWT from query string (e.g., wss://bioquantum-api.onrender.com:5003?token=<jwt>)
-  const urlParams = new URLSearchParams(req.url.split('?')[1]);
-  const token = urlParams.get('token');
-
-  // Validate JWT
+  const token = req.url.split('token=')[1];
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'dummy_jwt_secret_123');
-    ws.userId = decoded.userId;
+    jwt.verify(token, process.env.JWT_SECRET || 'dummy_jwt_secret_123');
+    ws.sessionId = uuidv4(); // Mock sessionId
   } catch (err) {
-    ws.send(JSON.stringify({ error: 'Invalid or missing JWT', requestId: uuidv4() }));
     ws.close();
-    return;
   }
+});
 
-  ws.on('message', (data) => {
-    try {
-      const message = JSON.parse(data);
-      if (message.type === 'share_file') {
-        sharedFiles.push({
-          fileName: message.fileName,
-          lastModified: new Date().toISOString()
-        });
-        ws.send(
-          JSON.stringify({
-            type: 'file_shared',
-            fileName: message.fileName,
-            fileType: message.fileType,
-            requestId: uuidv4()
-          })
-        );
-      }
-    } catch (err) {
-      ws.send(JSON.stringify({ error: 'Invalid message format', requestId: uuidv4() }));
+// Health check
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ready' });
+});
+
+// Create Nugget
+app.post('/nugget/create', (req, res) => {
+  const { userId, content, promptId, context, type, origin, semanticIndex, temporalCluster, contextAttribution } = req.body;
+  const token = req.headers.authorization?.split(' ')[1];
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || 'dummy_jwt_secret_123');
+    if (!userId || !content || !promptId || !context?.sessionId) {
+      return res.status(400).json({ error: 'Missing required fields', requestId: uuidv4() });
     }
-  });
+    const nuggetId = uuidv4();
+    const sessionId = context.sessionId;
+    const codon = {
+      nuggetId,
+      content,
+      promptId,
+      type: type || 'Condition',
+      origin: origin || 'User',
+      semanticIndex: semanticIndex || [],
+      temporalCluster: temporalCluster || new Date().toISOString(),
+      contextAttribution: contextAttribution || { userId, agentId: null },
+      timestamp: new Date().toISOString()
+    };
+    const strand = dnaStrands.get(sessionId) || { sessionId, codons: [] };
+    strand.codons.push(codon);
+    dnaStrands.set(sessionId, strand);
+    wss.clients.forEach(client => {
+      if (client.sessionId === sessionId) {
+        client.send(JSON.stringify({ type: 'nugget_update', ...codon, requestId: uuidv4() }));
+      }
+    });
+    res.status(200).json({ status: 'success', nuggetId, sessionId, requestId: uuidv4() });
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid JWT', requestId: uuidv4() });
+  }
+});
 
-  ws.on('close', () => {
-    console.log(`WebSocket connection closed for user: ${ws.userId}`);
-  });
+// Query Nugget
+app.post('/nugget/query', async (req, res) => {
+  const { filters } = req.body;
+  const token = req.headers.authorization?.split(' ')[1];
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || 'dummy_jwt_secret_123');
+    const cacheKey = `nuggets:${JSON.stringify(filters)}`;
+    const redisClient = redis.createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
+    await redisClient.connect();
+    const cached = await redisClient.get(cacheKey);
+    if (cached) {
+      await redisClient.quit();
+      return res.status(200).json({ nuggets: JSON.parse(cached), requestId: uuidv4() });
+    }
+    const nuggets = Array.from(dnaStrands.values()).flatMap(s => s.codons).filter(n => {
+      return (
+        (!filters?.riskLevel || n.riskLevel === filters.riskLevel) &&
+        (!filters?.agent || n.contextAttribution?.agentId === filters.agent) &&
+        (!filters?.strategy || n.content.includes(filters.strategy))
+      );
+    });
+    await redisClient.setEx(cacheKey, 3600, JSON.stringify(nuggets));
+    await redisClient.quit();
+    res.status(200).json({ nuggets, requestId: uuidv4() });
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid JWT', requestId: uuidv4() });
+  }
+});
+
+// Update Nugget Outcome
+app.post('/nugget/outcome', (req, res) => {
+  const { nuggetId, sessionId, outcome } = req.body;
+  const token = req.headers.authorization?.split(' ')[1];
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || 'dummy_jwt_secret_123');
+    const strand = dnaStrands.get(sessionId);
+    if (!strand) return res.status(404).json({ error: 'Session not found', requestId: uuidv4() });
+    const codon = strand.codons.find(c => c.nuggetId === nuggetId);
+    if (!codon) return res.status(404).json({ error: 'Nugget not found', requestId: uuidv4() });
+    codon.outcome = outcome;
+    dnaStrands.set(sessionId, strand);
+    wss.clients.forEach(client => {
+      if (client.sessionId === sessionId) {
+        client.send(JSON.stringify({ type: 'nugget_update', nuggetId, outcome, requestId: uuidv4() }));
+      }
+    });
+    res.status(200).json({ status: 'success', nuggetId, sessionId, requestId: uuidv4() });
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid JWT', requestId: uuidv4() });
+  }
+});
+
+// Timeline Endpoint
+app.get('/nugget/:id/timeline', (req, res) => {
+  const { id } = req.params;
+  const token = req.headers.authorization?.split(' ')[1];
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || 'dummy_jwt_secret_123');
+    const strands = Array.from(dnaStrands.values());
+    const codon = strands.flatMap(s => s.codons).find(c => c.nuggetId === id);
+    if (!codon) return res.status(404).json({ error: 'Nugget not found', requestId: uuidv4() });
+    const timeline = [{
+      event: 'Created',
+      timestamp: codon.timestamp,
+      details: { content: codon.content, type: codon.type, origin: codon.origin }
+    }];
+    if (codon.outcome) {
+      timeline.push({
+        event: 'Outcome',
+        timestamp: new Date().toISOString(),
+        details: codon.outcome
+      });
+    }
+    res.status(200).json({ timeline, requestId: uuidv4() });
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid JWT', requestId: uuidv4() });
+  }
+});
+
+app.listen(3000, () => {
+  console.log('🚀 API Bridge server listening on port 3000');
 });
