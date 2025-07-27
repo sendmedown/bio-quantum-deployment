@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
@@ -9,26 +11,23 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const dnaStrands = new Map(); // In-memory DNA model
+const dnaStrands = new Map();
 global.wss = new WebSocketServer({ port: 5003 });
 
-// WebSocket connection handler
 wss.on('connection', (ws, req) => {
   const token = req.url.split('token=')[1];
   try {
     jwt.verify(token, process.env.JWT_SECRET || 'dummy_jwt_secret_123');
-    ws.sessionId = uuidv4(); // Mock sessionId
+    ws.sessionId = uuidv4();
   } catch (err) {
     ws.close();
   }
 });
 
-// Health check
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ready' });
 });
 
-// Create Nugget
 app.post('/nugget/create', (req, res) => {
   const { userId, content, promptId, context, type, origin, semanticIndex, temporalCluster, contextAttribution } = req.body;
   const token = req.headers.authorization?.split(' ')[1];
@@ -64,7 +63,6 @@ app.post('/nugget/create', (req, res) => {
   }
 });
 
-// Query Nugget
 app.post('/nugget/query', async (req, res) => {
   const { filters } = req.body;
   const token = req.headers.authorization?.split(' ')[1];
@@ -73,27 +71,39 @@ app.post('/nugget/query', async (req, res) => {
     const cacheKey = `nuggets:${JSON.stringify(filters)}`;
     const redisClient = redis.createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
     await redisClient.connect();
-    const cached = await redisClient.get(cacheKey);
-    if (cached) {
+    try {
+      const cached = await redisClient.get(cacheKey);
+      if (cached) {
+        await redisClient.quit();
+        return res.status(200).json({ nuggets: JSON.parse(cached), requestId: uuidv4() });
+      }
+      const nuggets = Array.from(dnaStrands.values()).flatMap(s => s.codons).filter(n => {
+        return (
+          (!filters?.riskLevel || n.riskLevel === filters.riskLevel) &&
+          (!filters?.agent || n.contextAttribution?.agentId === filters.agent) &&
+          (!filters?.strategy || n.content.includes(filters.strategy))
+        );
+      });
+      await redisClient.setEx(cacheKey, 3600, JSON.stringify(nuggets));
       await redisClient.quit();
-      return res.status(200).json({ nuggets: JSON.parse(cached), requestId: uuidv4() });
+      res.status(200).json({ nuggets, requestId: uuidv4() });
+    } catch (err) {
+      console.error('Redis error:', err);
+      await redisClient.quit();
+      const fallback = Array.from(dnaStrands.values()).flatMap(s => s.codons).filter(n => {
+        return (
+          (!filters?.riskLevel || n.riskLevel === filters.riskLevel) &&
+          (!filters?.agent || n.contextAttribution?.agentId === filters.agent) &&
+          (!filters?.strategy || n.content.includes(filters.strategy))
+        );
+      });
+      res.status(200).json({ nuggets: fallback, requestId: uuidv4(), fallback: true });
     }
-    const nuggets = Array.from(dnaStrands.values()).flatMap(s => s.codons).filter(n => {
-      return (
-        (!filters?.riskLevel || n.riskLevel === filters.riskLevel) &&
-        (!filters?.agent || n.contextAttribution?.agentId === filters.agent) &&
-        (!filters?.strategy || n.content.includes(filters.strategy))
-      );
-    });
-    await redisClient.setEx(cacheKey, 3600, JSON.stringify(nuggets));
-    await redisClient.quit();
-    res.status(200).json({ nuggets, requestId: uuidv4() });
   } catch (err) {
     res.status(401).json({ error: 'Invalid JWT', requestId: uuidv4() });
   }
 });
 
-// Update Nugget Outcome
 app.post('/nugget/outcome', (req, res) => {
   const { nuggetId, sessionId, outcome } = req.body;
   const token = req.headers.authorization?.split(' ')[1];
@@ -116,7 +126,6 @@ app.post('/nugget/outcome', (req, res) => {
   }
 });
 
-// Timeline Endpoint
 app.get('/nugget/:id/timeline', (req, res) => {
   const { id } = req.params;
   const token = req.headers.authorization?.split(' ')[1];
@@ -143,6 +152,6 @@ app.get('/nugget/:id/timeline', (req, res) => {
   }
 });
 
-app.listen(3000, () => {
-  console.log('🚀 API Bridge server listening on port 3000');
+app.listen(10000, () => {
+  console.log('🚀 API Bridge server listening on port 10000');
 });
